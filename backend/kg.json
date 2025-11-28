@@ -1,0 +1,94 @@
+{
+  "entities": [
+    {
+      "id": "ent_nwb",
+      "name": "Northwind Weather Bureau",
+      "aliases": ["NWB", "Northwind Bureau"],
+      "type": "weather_agency"
+    },
+    {
+      "id": "ent_lakeside_city",
+      "name": "Lakeside City",
+      "aliases": ["Lakeside", "Lakeside Metro Area"],
+      "type": "city"
+    },
+    {
+      "id": "ent_lmr",
+      "name": "Lakeside Metro Rail",
+      "aliases": ["LMR", "Lakeside Metro"],
+      "type": "transit_agency"
+    }
+  ],
+  "sources": [
+    {
+      "id": "src_nwb_bulletin_2023_03_21",
+      "title": "Northwind Weather Bulletin – Lakeside City, 21 March 2023",
+      "source_type": "official_bulletin",
+      "publisher": "Northwind Weather Bureau",
+      "published_at": "2023-03-20T18:00:00Z",
+      "url": "https://mock.local/nwb/bulletins/2023-03-21-lakeside",
+      "language": "en",
+      "text": "Northwind Weather Bureau. Bulletin ID: NWB-LAK-2023-03-21. Issue date: 20 March 2023. Valid for: 21 March 2023. Area: Lakeside City. Weather advisory: An AMBER RAIN WARNING is in effect for Lakeside City on 21 March 2023. Periods of heavy rain are likely in the morning and early afternoon. Localized street flooding and transport delays are possible. This bulletin provides weather information only. Decisions about public transport schedules, including the Lakeside Metro Rail, are made by the respective operators."
+    },
+    {
+      "id": "src_lmr_advisory_2023_03_21",
+      "title": "Lakeside Metro Rail Service Update – 21 March 2023",
+      "source_type": "service_advisory",
+      "publisher": "Lakeside Metro Rail",
+      "published_at": "2023-03-20T19:30:00Z",
+      "url": "https://mock.local/lmr/advisories/2023-03-21",
+      "language": "en",
+      "text": "Lakeside Metro Rail. Service update for 21 March 2023. As of 20 March 2023, all Lakeside Metro Rail lines (Red, Blue and Circle) are planned to operate on a normal weekday schedule on 21 March 2023. At this time, no full network shutdown is planned in connection with the Northwind Weather Bureau amber rain warning. Short delays or minor adjustments may occur if water collects near tracks or stations. Riders are encouraged to check official Lakeside Metro channels for any real-time changes."
+    },
+    {
+      "id": "src_nwb_roles",
+      "title": "Northwind Weather Bureau – Roles and Responsibilities",
+      "source_type": "institutional_note",
+      "publisher": "Northwind Weather Bureau",
+      "published_at": "2022-11-01T09:00:00Z",
+      "url": "https://mock.local/nwb/about/roles",
+      "language": "en",
+      "text": "Northwind Weather Bureau – Roles and Responsibilities. The Northwind Weather Bureau issues forecasts and weather alerts, such as amber rain warnings, for cities in the Northwind region. The Bureau does not operate or manage any transport systems. It does not announce closures of metro lines, buses or other public transit. Decisions to suspend or continue such services are made by the agencies that run the services, such as Lakeside Metro Rail or city transport authorities."
+    }
+  ],
+  "facts": [
+    {
+      "id": "fact_nwb_amber_lakeside_2023_03_21",
+      "subject_entity_id": "ent_nwb",
+      "predicate": "issued_weather_warning",
+      "object_label": "Amber rain warning for Lakeside City on 21 March 2023",
+      "object_type": "weather_warning",
+      "location_entity_ids": ["ent_lakeside_city"],
+      "date": "2023-03-21",
+      "severity": "amber",
+      "source_id": "src_nwb_bulletin_2023_03_21",
+      "evidence_snippet": "An AMBER RAIN WARNING is in effect for Lakeside City on 21 March 2023.",
+      "tags": ["rain", "flooding_risk"]
+    },
+    {
+      "id": "fact_lmr_operational_2023_03_21",
+      "subject_entity_id": "ent_lmr",
+      "predicate": "announced_service_plan",
+      "object_label": "All Lakeside Metro Rail lines will operate on a normal weekday schedule on 21 March 2023",
+      "object_type": "service_status",
+      "location_entity_ids": ["ent_lakeside_city"],
+      "date": "2023-03-21",
+      "network_shutdown_planned": false,
+      "source_id": "src_lmr_advisory_2023_03_21",
+      "evidence_snippet": "All Lakeside Metro Rail lines are planned to operate on a normal weekday schedule on 21 March 2023. At this time, no full network shutdown is planned.",
+      "tags": ["metro_service", "no_full_shutdown"]
+    },
+    {
+      "id": "fact_nwb_no_transport_decisions",
+      "subject_entity_id": "ent_nwb",
+      "predicate": "does_not_decide_transport_operations",
+      "object_label": "Does not announce closures of metro lines, buses or other public transit",
+      "object_type": "institutional_role",
+      "location_entity_ids": [],
+      "date": null,
+      "source_id": "src_nwb_roles",
+      "evidence_snippet": "The Bureau does not operate or manage any transport systems. It does not announce closures of metro lines, buses or other public transit.",
+      "tags": ["institutional_role", "transport_decisions"]
+    }
+  ]
+}
