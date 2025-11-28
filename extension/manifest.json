@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "FactLens Reddit Overlay",
+  "version": "0.1",
+  "description": "Inline fact-check overlay for Reddit posts, with a details dashboard.",
+  "permissions": ["scripting", "activeTab"],
+  "host_permissions": ["http://localhost:8000/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.reddit.com/*"],
+      "js": ["content_script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["dashboard.html", "dashboard.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

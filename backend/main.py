@@ -6,22 +6,15 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
-from openai import OpenAI
 
-# Load env vars
-load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# ----- FastAPI app -----
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+app = FastAPI(title="FactLens Demo Backend (No External LLM)")
 
-app = FastAPI(title="FactLens Demo Backend")
-
-# CORS for local extension
+# Allow requests from the extension / browser
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # for demo
+    allow_origins=["*"],  # OK for demo; tighten in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,7 +22,8 @@ app.add_middleware(
 
 # ----- Load KG -----
 
-with open("kg.json", "r", encoding="utf-8") as f:
+KG_PATH = os.path.join(os.path.dirname(__file__), "kg.json")
+with open(KG_PATH, "r", encoding="utf-8") as f:
     KG = json.load(f)
 
 ENTITIES = KG["entities"]
@@ -38,7 +32,7 @@ FACTS = KG["facts"]
 ENTITIES_BY_ID = {e["id"]: e for e in ENTITIES}
 
 
-# ----- Models -----
+# ----- Pydantic models -----
 
 class VerifyRequest(BaseModel):
     text: str
@@ -57,7 +51,7 @@ class VerifyResponse(BaseModel):
     reasoning: str
 
 
-# ----- Simple entity extraction -----
+# ----- Helpers: entity detection + KG search -----
 
 def extract_entities(text: str) -> List[str]:
     """
@@ -75,8 +69,6 @@ def extract_entities(text: str) -> List[str]:
                 break
     return list(entity_ids)
 
-
-# ----- KG search -----
 
 def tokenize(s: str) -> List[str]:
     return re.findall(r"\w+", s.lower())
@@ -149,116 +141,136 @@ def search_kg(query: str, entity_ids: Optional[List[str]] = None, top_k: int = 5
     return results
 
 
-# ----- LLM helpers -----
+# ----- "Fake agent" logic tailored to your 3 demo claims -----
 
-def extract_claims_via_llm(text: str) -> List[str]:
+def extract_claims(text: str) -> List[str]:
     """
-    Ask the model to extract verifiable factual claims from a post.
-    Returns a list of claim strings.
+    For this demo, treat the entire post text as ONE claim.
+    Your Reddit posts should contain the claim sentence clearly.
     """
-    prompt = (
-        "You are a claim extraction assistant.\n"
-        "Given a social media post, extract verifiable factual claims.\n"
-        "Return a JSON array of strings. If there are no claims, return []."
-    )
-
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": text}
-        ],
-        temperature=0
-    )
-    content = response.choices[0].message.content
-    # Be robust: try to find JSON array in content
-    try:
-        claims = json.loads(content)
-        if isinstance(claims, list):
-            return [c for c in claims if isinstance(c, str)]
-    except Exception:
-        # Fallback: treat whole content as one claim
-        return [content.strip()]
-    return []
+    t = text.strip()
+    return [t] if t else []
 
 
-def assess_claim_via_llm(claim: str, kg_evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
+def assess_claim_rule_based(claim: str, kg_evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Give the model the claim + KG evidence and ask it to return:
-    { verdict, confidence, citations, reasoning } as JSON.
-    Citations must be fact_ids from the evidence list.
+    Simple rule-based 'agent' that uses KG facts to decide verdicts
+    for 3 patterns:
+      - C1: Amber warning issued
+      - C2: Metro runs on normal schedule, no shutdown
+      - C3: Rumour that all metro is cancelled and NWB said metro won't run
     """
-    system_prompt = (
-        "You are FactLens, a cautious fact-checking agent.\n"
-        "You are given ONE claim and a list of evidence items from a knowledge graph.\n"
-        "You MUST base your judgment ONLY on these evidence items.\n"
-        "If evidence clearly supports the claim, verdict = 'True'.\n"
-        "If evidence clearly contradicts the claim, verdict = 'False'.\n"
-        "If parts are supported and parts are contradicted, verdict = 'Partly True'.\n"
-        "If there is not enough relevant evidence either way, verdict = 'Unverifiable'.\n"
-        "Return ONLY a JSON object with fields:\n"
-        "  verdict: one of ['True','False','Partly True','Unverifiable']\n"
-        "  confidence: float between 0 and 1\n"
-        "  citations: array of fact_id strings, each must be from the provided evidence\n"
-        "  reasoning: short explanation (2-5 sentences)\n"
-        "Do NOT use any outside knowledge. Ignore any real-world facts not in the evidence."
-    )
 
-    evidence_for_model = [
-        {
-            "fact_id": e["fact_id"],
-            "predicate": e["predicate"],
-            "object_label": e["object_label"],
-            "date": e.get("date"),
-            "severity": e.get("severity"),
-            "subject": e["subject"]["name"] if e.get("subject") else None,
-            "source_title": e["source"]["title"] if e.get("source") else None,
-            "source_publisher": e["source"]["publisher"] if e.get("source") else None,
-            "evidence_snippet": e.get("evidence_snippet")
-        }
-        for e in kg_evidence
-    ]
+    lower = claim.lower()
 
-    user_content = (
-        "Claim:\n"
-        f"{claim}\n\n"
-        "Evidence items (JSON array):\n"
-        f"{json.dumps(evidence_for_model, ensure_ascii=False, indent=2)}"
-    )
+    def has_fact(fid: str) -> bool:
+        return any(e["fact_id"] == fid for e in kg_evidence)
 
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content}
-        ],
-        temperature=0
-    )
-    content = response.choices[0].message.content
-    try:
-        result = json.loads(content)
-        # Basic validation
-        if "verdict" in result and "confidence" in result and "citations" in result and "reasoning" in result:
-            # ensure citations are subset of fact_ids
-            valid_fact_ids = {e["fact_id"] for e in kg_evidence}
-            result["citations"] = [c for c in result["citations"] if c in valid_fact_ids]
-            return result
-    except Exception:
-        # Fallback if parsing fails
-        return {
-            "verdict": "Unverifiable",
-            "confidence": 0.5,
-            "citations": [],
-            "reasoning": "Could not parse model output. Treating as unverifiable."
-        }
+    # Convenience booleans
+    has_amber = has_fact("fact_nwb_amber_lakeside_2023_03_21")
+    has_metro_normal = has_fact("fact_lmr_operational_2023_03_21")
+    has_nwb_role = has_fact("fact_nwb_no_transport_decisions")
+
+    # --- Claim 1: Amber warning for Lakeside City ---
+    if (
+        "northwind weather bureau" in lower
+        and "amber rain warning" in lower
+        and "lakeside city" in lower
+    ):
+        if has_amber:
+            return {
+                "verdict": "True",
+                "confidence": 0.95,
+                "citations": ["fact_nwb_amber_lakeside_2023_03_21"],
+                "reasoning": (
+                    "The knowledge graph contains a fact stating that Northwind Weather Bureau issued an amber "
+                    "rain warning for Lakeside City on 21 March 2023. This directly supports the claim."
+                )
+            }
+        else:
+            return {
+                "verdict": "Unverifiable",
+                "confidence": 0.4,
+                "citations": [],
+                "reasoning": "No matching weather warning fact was found in the knowledge graph."
+            }
+
+    # --- Claim 2: Metro runs on normal weekday schedule; no full shutdown ---
+    if (
+        "lakeside metro rail" in lower
+        and "normal weekday schedule" in lower
+        and ("no full network shutdown" in lower or "no full shutdown" in lower)
+    ):
+        if has_metro_normal:
+            return {
+                "verdict": "True",
+                "confidence": 0.95,
+                "citations": ["fact_lmr_operational_2023_03_21"],
+                "reasoning": (
+                    "The knowledge graph contains a fact from Lakeside Metro Rail stating that all lines will "
+                    "operate on a normal weekday schedule on 21 March 2023 and that no full network shutdown "
+                    "is planned. This matches the claim."
+                )
+            }
+        else:
+            return {
+                "verdict": "Unverifiable",
+                "confidence": 0.4,
+                "citations": [],
+                "reasoning": "No matching service-status fact for Lakeside Metro Rail was found in the knowledge graph."
+            }
+
+    # --- Claim 3: Rumour of total cancellation & NWB supposedly saying metro won't run ---
+    if (
+        "all lakeside metro rail services" in lower and
+        ("cancelled" in lower or "canceled" in lower)
+    ) or ("metro will not run" in lower):
+        if has_amber and has_metro_normal and has_nwb_role:
+            return {
+                "verdict": "Partly True",
+                "confidence": 0.9,
+                "citations": [
+                    "fact_nwb_amber_lakeside_2023_03_21",
+                    "fact_lmr_operational_2023_03_21",
+                    "fact_nwb_no_transport_decisions"
+                ],
+                "reasoning": (
+                    "The knowledge graph confirms that an amber rain warning is in effect for Lakeside City on "
+                    "21 March 2023. However, Lakeside Metro Rail has announced that all lines will operate on a "
+                    "normal weekday schedule and that no full network shutdown is planned. In addition, the "
+                    "Northwind Weather Bureau states that it does not announce closures of metro or other public "
+                    "transport. Therefore the part of the claim about the weather warning is true, but the parts "
+                    "about all metro services being cancelled and NWB saying the metro will not run are not "
+                    "supported and are contradicted by the available evidence."
+                )
+            }
+        else:
+            return {
+                "verdict": "Unverifiable",
+                "confidence": 0.4,
+                "citations": [],
+                "reasoning": (
+                    "The claim alleges complete cancellation of metro services and that the weather bureau said the "
+                    "metro will not run, but the knowledge graph does not contain enough conflicting or supporting "
+                    "evidence to decide this claim."
+                )
+            }
+
+    # --- Default fallback for any other text ---
+    return {
+        "verdict": "Unverifiable",
+        "confidence": 0.5,
+        "citations": [],
+        "reasoning": "The claim does not match any known patterns in this demo knowledge graph."
+    }
 
 
 # ----- /verify endpoint -----
 
 @app.post("/verify", response_model=VerifyResponse)
 def verify(req: VerifyRequest):
-    # 1) Extract claims
-    claims = extract_claims_via_llm(req.text)
+    # 1) Extract claims (single-claim stub)
+    claims = extract_claims(req.text)
     if not claims:
         return VerifyResponse(
             claim="",
@@ -268,7 +280,6 @@ def verify(req: VerifyRequest):
             reasoning="No verifiable factual claim found in the text."
         )
 
-    # For demo: take the first claim
     claim = claims[0]
 
     # 2) Extract entities from the claim
@@ -277,11 +288,11 @@ def verify(req: VerifyRequest):
     # 3) Search KG for evidence
     kg_evidence = search_kg(claim, entity_ids=entity_ids, top_k=5)
 
-    # 4) Ask LLM to assess based on evidence
-    assessment = assess_claim_via_llm(claim, kg_evidence)
+    # 4) Rule-based assessment using only KG evidence
+    assessment = assess_claim_rule_based(claim, kg_evidence)
 
-    # 5) Build response
-    citations = []
+    # 5) Build response with citations
+    citations: List[Citation] = []
     for fact_id in assessment.get("citations", []):
         fact = next((f for f in FACTS if f["id"] == fact_id), None)
         if not fact:
