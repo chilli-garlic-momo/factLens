@@ -27,12 +27,16 @@ On selected Reddit posts, you’ll see a chip like:
 
 > `FACTLENS • True (96%) — Amber warning confirmed for Lakeside City on 21 March 2023.  [View details]`
 
+![Inline FactLens badge under a Reddit post](assets/p1.jpg)
+
 Clicking **“View details”** opens a dashboard tab:
 
 - **Claim** – the extracted factual statement
 - **Verdict** – True / False / Partly True / Unverifiable + confidence
 - **Reasoning** – short explanation
 - **Citations** – IDs of facts & sources from the knowledge graph
+
+![Dashboard with verdict, confidence and sources](assets/p2.jpg)
 
 ### Core demo narratives
 
@@ -52,6 +56,8 @@ All in a synthetic city (“Lakeside City”) with a fake weather bureau & metro
    > - NWB amber alert fact (True)  
    > - LMR “normal schedule, no shutdown” fact (contradicts cancellation)  
    > - NWB role fact (“does not decide transport operations”, contradicts “NWB said metro will not run”)
+
+![Examples of TRUE, FALSE and UNVERIFIABLE cases](assets/p3.jpg)
 
 ---
 
