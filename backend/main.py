@@ -6,12 +6,29 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from dotenv import load_dotenv
+from groq import Groq
 
-# ----- FastAPI app -----
+# =========================
+# Groq config
+# =========================
 
-app = FastAPI(title="FactLens Demo Backend (No External LLM)")
+load_dotenv()  # loads .env from this folder if present
 
-# Allow requests from the extension / browser
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY is not set. Set it in .env or hardcode it in main.py.")
+
+client = Groq(api_key=GROQ_API_KEY)
+
+# =========================
+# FastAPI app
+# =========================
+
+app = FastAPI(title="FactLens Demo Backend (Groq LLM + KG)")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # OK for demo; tighten in production
@@ -20,7 +37,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----- Load KG -----
+# =========================
+# Load KG
+# =========================
 
 KG_PATH = os.path.join(os.path.dirname(__file__), "kg.json")
 with open(KG_PATH, "r", encoding="utf-8") as f:
@@ -32,7 +51,9 @@ FACTS = KG["facts"]
 ENTITIES_BY_ID = {e["id"]: e for e in ENTITIES}
 
 
-# ----- Pydantic models -----
+# =========================
+# Pydantic models
+# =========================
 
 class VerifyRequest(BaseModel):
     text: str
@@ -51,7 +72,13 @@ class VerifyResponse(BaseModel):
     reasoning: str
 
 
-# ----- Helpers: entity detection + KG search -----
+# =========================
+# Helpers: entity detection + KG search
+# =========================
+
+def tokenize(s: str) -> List[str]:
+    return re.findall(r"\w+", s.lower())
+
 
 def extract_entities(text: str) -> List[str]:
     """
@@ -70,11 +97,9 @@ def extract_entities(text: str) -> List[str]:
     return list(entity_ids)
 
 
-def tokenize(s: str) -> List[str]:
-    return re.findall(r"\w+", s.lower())
-
-
-def search_kg(query: str, entity_ids: Optional[List[str]] = None, top_k: int = 5) -> List[Dict[str, Any]]:
+def search_kg(
+    query: str, entity_ids: Optional[List[str]] = None, top_k: int = 5
+) -> List[Dict[str, Any]]:
     """
     Naive lexical search over KG facts.
     Scores based on token overlap; optionally filters by entities.
@@ -87,12 +112,14 @@ def search_kg(query: str, entity_ids: Optional[List[str]] = None, top_k: int = 5
         if entity_ids:
             subject_id = fact.get("subject_entity_id")
             loc_ids = fact.get("location_entity_ids", [])
-            if subject_id not in entity_ids and not any(eid in entity_ids for eid in loc_ids):
+            if subject_id not in entity_ids and not any(
+                eid in entity_ids for eid in loc_ids
+            ):
                 continue
 
         text_fields = [
             fact.get("object_label", ""),
-            fact.get("evidence_snippet", "")
+            fact.get("evidence_snippet", ""),
         ]
         tokens = set()
         for field in text_fields:
@@ -107,189 +134,301 @@ def search_kg(query: str, entity_ids: Optional[List[str]] = None, top_k: int = 5
 
     # Sort by score descending
     scored_facts.sort(key=lambda x: x[0], reverse=True)
-    results = []
+    results: List[Dict[str, Any]] = []
     for score, fact in scored_facts[:top_k]:
         subj = ENTITIES_BY_ID.get(fact["subject_entity_id"])
         src = SOURCES.get(fact["source_id"])
-        result = {
-            "fact_id": fact["id"],
-            "score": float(score),
-            "subject": {
-                "id": subj["id"],
-                "name": subj["name"],
-                "type": subj["type"]
-            } if subj else None,
-            "predicate": fact.get("predicate"),
-            "object_label": fact.get("object_label"),
-            "object_type": fact.get("object_type"),
-            "date": fact.get("date"),
-            "severity": fact.get("severity"),
-            "location_entities": [
-                ENTITIES_BY_ID[lid] for lid in fact.get("location_entity_ids", []) if lid in ENTITIES_BY_ID
-            ],
-            "source": {
-                "id": src["id"],
-                "title": src["title"],
-                "publisher": src["publisher"],
-                "published_at": src["published_at"],
-                "url": src["url"]
-            } if src else None,
-            "evidence_snippet": fact.get("evidence_snippet")
-        }
-        results.append(result)
+        results.append(
+            {
+                "fact_id": fact["id"],
+                "score": float(score),
+                "subject": {
+                    "id": subj["id"],
+                    "name": subj["name"],
+                    "type": subj["type"],
+                }
+                if subj
+                else None,
+                "predicate": fact.get("predicate"),
+                "object_label": fact.get("object_label"),
+                "object_type": fact.get("object_type"),
+                "date": fact.get("date"),
+                "severity": fact.get("severity"),
+                "location_entities": [
+                    ENTITIES_BY_ID[lid]
+                    for lid in fact.get("location_entity_ids", [])
+                    if lid in ENTITIES_BY_ID
+                ],
+                "source": {
+                    "id": src["id"],
+                    "title": src["title"],
+                    "publisher": src["publisher"],
+                    "published_at": src["published_at"],
+                    "url": src["url"],
+                }
+                if src
+                else None,
+                "evidence_snippet": fact.get("evidence_snippet"),
+            }
+        )
 
     return results
 
 
-# ----- "Fake agent" logic tailored to your 3 demo claims -----
+# =========================
+# Fallback heuristic for claims
+# =========================
 
-def extract_claims(text: str) -> List[str]:
+def _heuristic_claim_from_text(text: str) -> Optional[str]:
     """
-    For this demo, treat the entire post text as ONE claim.
-    Your Reddit posts should contain the claim sentence clearly.
+    Simple fallback when the LLM claim extractor returns nothing or fails:
+    - Split by sentence boundaries and newlines.
+    - Pick the first non-trivial sentence (>= 4 tokens).
+    - If none, return the whole text or None.
+    This is deliberately not strict, so even short or Hinglish posts
+    like 'Amber warning = Lakeside Metro cancel ho jayega?' become claims.
     """
-    t = text.strip()
-    return [t] if t else []
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    # Split on ., ?, !, or newline
+    parts = re.split(r"[.\n!?]+", stripped)
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if len(tokenize(p)) >= 4:
+            return p
+
+    return stripped
 
 
-def assess_claim_rule_based(claim: str, kg_evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
+# =========================
+# LLM helpers (Groq)
+# =========================
+
+def extract_claims_via_llm(text: str) -> List[str]:
     """
-    Simple rule-based 'agent' that uses KG facts to decide verdicts
-    for 3 patterns:
-      - C1: Amber warning issued
-      - C2: Metro runs on normal schedule, no shutdown
-      - C3: Rumour that all metro is cancelled and NWB said metro won't run
+    Use LLM to extract verifiable factual claims.
+    We are deliberately NOT super-strict:
+    - If there's any factual-looking sentence, we want at least one claim.
+    - If the model is unsure, it's told to include the main sentence.
+    - If parsing fails, we fall back to a heuristic.
     """
+    system_prompt = (
+        "You are a claim extraction assistant.\n"
+        "Given a social media post, extract explicit, verifiable factual claims.\n"
+        "- A factual claim is any sentence that asserts something that could be true or false.\n"
+        "- If there is at least one such sentence, you MUST include at least one item.\n"
+        "- If you are unsure, include the entire post text as a single claim.\n"
+        "- VERY IMPORTANT: Whenever possible, copy the claim sentence VERBATIM from the post instead of paraphrasing or rewriting it.\n"
+        "Return ONLY a JSON array of strings. If there are truly no factual statements, return []."
+    )
 
-    lower = claim.lower()
+    print("  [LLM] extract_claims_via_llm input text:", repr(text[:400]))
 
-    def has_fact(fid: str) -> bool:
-        return any(e["fact_id"] == fid for e in kg_evidence)
+    try:
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+        )
+        raw = response.choices[0].message.content
+        print("  [LLM] raw claim extraction output:", repr(raw[:400]))
+    except Exception as e:
+        print("  [LLM] ERROR in extract_claims_via_llm:", repr(e))
+        hc = _heuristic_claim_from_text(text)
+        return [hc] if hc else []
 
-    # Convenience booleans
-    has_amber = has_fact("fact_nwb_amber_lakeside_2023_03_21")
-    has_metro_normal = has_fact("fact_lmr_operational_2023_03_21")
-    has_nwb_role = has_fact("fact_nwb_no_transport_decisions")
+    # Try to parse JSON array
+    try:
+        claims = json.loads(raw)
+        if isinstance(claims, list):
+            cleaned = [c.strip() for c in claims if isinstance(c, str) and c.strip()]
+            if cleaned:
+                return cleaned
+    except Exception as e:
+        print("  [LLM] ERROR parsing claim JSON:", repr(e))
 
-    # --- Claim 1: Amber warning for Lakeside City ---
-    if (
-        "northwind weather bureau" in lower
-        and "amber rain warning" in lower
-        and "lakeside city" in lower
-    ):
-        if has_amber:
-            return {
-                "verdict": "True",
-                "confidence": 0.95,
-                "citations": ["fact_nwb_amber_lakeside_2023_03_21"],
-                "reasoning": (
-                    "The knowledge graph contains a fact stating that Northwind Weather Bureau issued an amber "
-                    "rain warning for Lakeside City on 21 March 2023. This directly supports the claim."
-                )
-            }
-        else:
-            return {
-                "verdict": "Unverifiable",
-                "confidence": 0.4,
-                "citations": [],
-                "reasoning": "No matching weather warning fact was found in the knowledge graph."
-            }
+    # Fallback if model returned something but not valid JSON
+    hc = _heuristic_claim_from_text(text)
+    return [hc] if hc else []
 
-    # --- Claim 2: Metro runs on normal weekday schedule; no full shutdown ---
-    if (
-        "lakeside metro rail" in lower
-        and "normal weekday schedule" in lower
-        and ("no full network shutdown" in lower or "no full shutdown" in lower)
-    ):
-        if has_metro_normal:
-            return {
-                "verdict": "True",
-                "confidence": 0.95,
-                "citations": ["fact_lmr_operational_2023_03_21"],
-                "reasoning": (
-                    "The knowledge graph contains a fact from Lakeside Metro Rail stating that all lines will "
-                    "operate on a normal weekday schedule on 21 March 2023 and that no full network shutdown "
-                    "is planned. This matches the claim."
-                )
-            }
-        else:
-            return {
-                "verdict": "Unverifiable",
-                "confidence": 0.4,
-                "citations": [],
-                "reasoning": "No matching service-status fact for Lakeside Metro Rail was found in the knowledge graph."
-            }
 
-    # --- Claim 3: Rumour of total cancellation & NWB supposedly saying metro won't run ---
-    if (
-        "all lakeside metro rail services" in lower and
-        ("cancelled" in lower or "canceled" in lower)
-    ) or ("metro will not run" in lower):
-        if has_amber and has_metro_normal and has_nwb_role:
-            return {
-                "verdict": "Partly True",
-                "confidence": 0.9,
-                "citations": [
-                    "fact_nwb_amber_lakeside_2023_03_21",
-                    "fact_lmr_operational_2023_03_21",
-                    "fact_nwb_no_transport_decisions"
-                ],
-                "reasoning": (
-                    "The knowledge graph confirms that an amber rain warning is in effect for Lakeside City on "
-                    "21 March 2023. However, Lakeside Metro Rail has announced that all lines will operate on a "
-                    "normal weekday schedule and that no full network shutdown is planned. In addition, the "
-                    "Northwind Weather Bureau states that it does not announce closures of metro or other public "
-                    "transport. Therefore the part of the claim about the weather warning is true, but the parts "
-                    "about all metro services being cancelled and NWB saying the metro will not run are not "
-                    "supported and are contradicted by the available evidence."
-                )
-            }
-        else:
-            return {
-                "verdict": "Unverifiable",
-                "confidence": 0.4,
-                "citations": [],
-                "reasoning": (
-                    "The claim alleges complete cancellation of metro services and that the weather bureau said the "
-                    "metro will not run, but the knowledge graph does not contain enough conflicting or supporting "
-                    "evidence to decide this claim."
-                )
-            }
+def assess_claim_via_llm(
+    claim: str, kg_evidence: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Use LLM to decide verdict using only KG evidence.
+    We are not super-strict about exact wording; model can reason flexibly.
+    """
+    system_prompt = (
+        "You are FactLens, a cautious fact-checking agent.\n"
+        "You are given ONE claim and a list of evidence items from a knowledge graph.\n"
+        "The claim may contain MULTIPLE sub-claims (e.g. about different entities or effects).\n"
+        "You MUST:\n"
+        "- Identify the main sub-claims in the statement.\n"
+        "- Compare EACH sub-claim against the evidence items.\n"
+        "- Decide an overall verdict:\n"
+        "    * 'True' if all major parts are supported.\n"
+        "    * 'False' if all major parts are contradicted.\n"
+        "    * 'Partly True' if some major parts are supported and others contradicted.\n"
+        "    * 'Unverifiable' if there is not enough relevant evidence either way.\n"
+        "Return ONLY a JSON object with fields:\n"
+        "  verdict: one of ['True','False','Partly True','Unverifiable']\n"
+        "  confidence: float between 0 and 1\n"
+        "  citations: array of fact_id strings, each must be from the provided evidence\n"
+        "  reasoning: short explanation (2-5 sentences) that explicitly mentions which parts of the claim are supported or contradicted.\n"
+        "You MUST base your judgment ONLY on the provided evidence items.\n"
+        "Do NOT use any outside knowledge. Ignore any real-world facts not in the evidence.\n"
+        "Respond with pure JSON, no markdown, no backticks."
+    )
 
-    # --- Default fallback for any other text ---
+    evidence_for_model = [
+        {
+            "fact_id": e["fact_id"],
+            "predicate": e["predicate"],
+            "object_label": e["object_label"],
+            "date": e.get("date"),
+            "severity": e.get("severity"),
+            "subject": e["subject"]["name"] if e.get("subject") else None,
+            "source_title": e["source"]["title"] if e.get("source") else None,
+            "source_publisher": e["source"]["publisher"] if e.get("source") else None,
+            "evidence_snippet": e.get("evidence_snippet"),
+        }
+        for e in kg_evidence
+    ]
+
+    user_content = (
+        "Claim:\n"
+        f"{claim}\n\n"
+        "Evidence items (JSON array):\n"
+        f"{json.dumps(evidence_for_model, ensure_ascii=False, indent=2)}"
+    )
+
+    print("  [LLM] assess_claim_via_llm claim:", repr(claim))
+    print(
+        "  [LLM] evidence_for_model:",
+        json.dumps(evidence_for_model, indent=2, ensure_ascii=False),
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0,
+        )
+        raw = response.choices[0].message.content
+        print("  [LLM] raw assessment output:", repr(raw[:400]))
+    except Exception as e:
+        print("  [LLM] ERROR in assess_claim_via_llm:", repr(e))
+        return {
+            "verdict": "Unverifiable",
+            "confidence": 0.5,
+            "citations": [],
+            "reasoning": "LLM call failed; treating claim as unverifiable.",
+        }
+
+    try:
+        result = json.loads(raw)
+        if (
+            isinstance(result, dict)
+            and "verdict" in result
+            and "confidence" in result
+            and "citations" in result
+            and "reasoning" in result
+        ):
+            valid_fact_ids = {e["fact_id"] for e in kg_evidence}
+            result["citations"] = [
+                c for c in result["citations"] if c in valid_fact_ids
+            ]
+            try:
+                conf = float(result["confidence"])
+            except Exception:
+                conf = 0.5
+            result["confidence"] = max(0.0, min(1.0, conf))
+            return result
+    except Exception as e:
+        print("  [LLM] ERROR parsing assessment JSON:", repr(e))
+
     return {
         "verdict": "Unverifiable",
         "confidence": 0.5,
         "citations": [],
-        "reasoning": "The claim does not match any known patterns in this demo knowledge graph."
+        "reasoning": "Could not parse model output. Treating as unverifiable.",
     }
 
 
-# ----- /verify endpoint -----
+# =========================
+# /verify endpoint
+# =========================
 
 @app.post("/verify", response_model=VerifyResponse)
 def verify(req: VerifyRequest):
-    # 1) Extract claims (single-claim stub)
-    claims = extract_claims(req.text)
-    if not claims:
+    print("\n====================")
+    print(" /verify called")
+    print(" Raw req.text:")
+    print(repr(req.text))
+    print("====================")
+
+    text = (req.text or "").strip()
+
+    if not text:
+        print(" Empty text; returning Unverifiable.")
         return VerifyResponse(
             claim="",
             verdict="Unverifiable",
             confidence=0.5,
             citations=[],
-            reasoning="No verifiable factual claim found in the text."
+            reasoning="No text provided.",
         )
 
+    # 1) Extract claims via LLM (with fallbacks inside)
+    claims = extract_claims_via_llm(text)
+    print(" Extracted claims (after fallbacks):", claims)
+
+    if not claims:
+        print(" Still no claims; returning Unverifiable.")
+        return VerifyResponse(
+            claim="",
+            verdict="Unverifiable",
+            confidence=0.5,
+            citations=[],
+            reasoning="No verifiable factual claim found in the text.",
+        )
+
+    # For demo, use the first claim
     claim = claims[0]
+    print(" Using claim:", repr(claim))
 
     # 2) Extract entities from the claim
     entity_ids = extract_entities(claim)
+    print(" Detected entity_ids:", entity_ids)
 
     # 3) Search KG for evidence
     kg_evidence = search_kg(claim, entity_ids=entity_ids, top_k=5)
+    print(" KG evidence fact_ids:", [e["fact_id"] for e in kg_evidence])
 
-    # 4) Rule-based assessment using only KG evidence
-    assessment = assess_claim_rule_based(claim, kg_evidence)
+    if not kg_evidence:
+        print(" No KG evidence; returning Unverifiable.")
+        return VerifyResponse(
+            claim=claim,
+            verdict="Unverifiable",
+            confidence=0.5,
+            citations=[],
+            reasoning="No relevant evidence was found in the knowledge graph.",
+        )
+
+    # 4) LLM-based assessment using only KG evidence
+    assessment = assess_claim_via_llm(claim, kg_evidence)
+    print(" Assessment:", assessment)
 
     # 5) Build response with citations
     citations: List[Citation] = []
@@ -298,16 +437,18 @@ def verify(req: VerifyRequest):
         if not fact:
             continue
         citations.append(
-            Citation(
-                fact_id=fact_id,
-                source_id=fact["source_id"]
-            )
+            Citation(fact_id=fact_id, source_id=fact["source_id"])
         )
 
-    return VerifyResponse(
+    resp = VerifyResponse(
         claim=claim,
         verdict=assessment.get("verdict", "Unverifiable"),
         confidence=float(assessment.get("confidence", 0.5)),
         citations=citations,
-        reasoning=assessment.get("reasoning", "")
+        reasoning=assessment.get("reasoning", ""),
     )
+
+    print(" Final response:", resp.model_dump())
+    print("====================\n")
+
+    return resp

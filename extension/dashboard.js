@@ -1,3 +1,5 @@
+const BACKEND_URL = "http://localhost:8080"; // same as in content_script.js
+
 function getQueryParam(name) {
   const params = new URLSearchParams(window.location.search);
   return params.get(name);
@@ -5,9 +7,9 @@ function getQueryParam(name) {
 
 async function loadAnalysis() {
   const loadingEl = document.getElementById("loading");
-  const contentEl = document.getElementById("content");
+  const cardEl = document.getElementById("card");
   const claimEl = document.getElementById("claim");
-  const verdictBadgeEl = document.getElementById("verdictBadge");
+  const verdictPillEl = document.getElementById("verdictPill");
   const confidenceEl = document.getElementById("confidence");
   const reasoningEl = document.getElementById("reasoning");
   const citationsEl = document.getElementById("citations");
@@ -19,14 +21,14 @@ async function loadAnalysis() {
   }
 
   try {
-    const res = await fetch("http://localhost:8000/verify", {
+    const res = await fetch(`${BACKEND_URL}/verify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text }),
     });
 
     if (!res.ok) {
-      loadingEl.textContent = "Backend error: " + res.status;
+      loadingEl.textContent = `Backend error: ${res.status}`;
       return;
     }
 
@@ -34,54 +36,61 @@ async function loadAnalysis() {
     console.log("FactLens dashboard: received", data);
 
     loadingEl.style.display = "none";
-    contentEl.style.display = "block";
+    cardEl.style.display = "block";
 
     // Claim
     claimEl.textContent = data.claim || text;
 
-    // Verdict badge
-    verdictBadgeEl.textContent = data.verdict || "Unverifiable";
-    verdictBadgeEl.style.backgroundColor = "#e5e7eb";
-    verdictBadgeEl.style.color = "#374151";
+    // Verdict
+    const verdict = (data.verdict || "Unverifiable").toLowerCase();
+    verdictPillEl.textContent = data.verdict || "Unverifiable";
 
-    if (data.verdict === "True") {
-      verdictBadgeEl.style.backgroundColor = "#dcfce7";
-      verdictBadgeEl.style.color = "#166534";
-    } else if (data.verdict === "False") {
-      verdictBadgeEl.style.backgroundColor = "#fee2e2";
-      verdictBadgeEl.style.color = "#b91c1c";
-    } else if (data.verdict === "Partly True") {
-      verdictBadgeEl.style.backgroundColor = "#fef3c7";
-      verdictBadgeEl.style.color = "#92400e";
+    verdictPillEl.classList.remove(
+      "factlens-verdict-true",
+      "factlens-verdict-false",
+      "factlens-verdict-partly",
+      "factlens-verdict-unverifiable"
+    );
+    if (verdict === "true") {
+      verdictPillEl.classList.add("factlens-verdict-true");
+    } else if (verdict === "false") {
+      verdictPillEl.classList.add("factlens-verdict-false");
+    } else if (verdict === "partly true") {
+      verdictPillEl.classList.add("factlens-verdict-partly");
+    } else {
+      verdictPillEl.classList.add("factlens-verdict-unverifiable");
     }
 
-    const conf = data.confidence || 0;
+    const conf = typeof data.confidence === "number" ? data.confidence : 0.5;
     confidenceEl.textContent = `Confidence: ${(conf * 100).toFixed(1)}%`;
 
-    reasoningEl.textContent = data.reasoning || "No reasoning available.";
+    // Reasoning
+    reasoningEl.textContent =
+      data.reasoning || "No reasoning available for this claim.";
 
     // Citations
     citationsEl.innerHTML = "";
     if (!data.citations || data.citations.length === 0) {
       const noCit = document.createElement("div");
+      noCit.className = "factlens-citation";
       noCit.textContent = "No citations available for this claim.";
-      noCit.className = "citation";
       citationsEl.appendChild(noCit);
     } else {
       for (const cit of data.citations) {
         const citDiv = document.createElement("div");
-        citDiv.className = "citation";
+        citDiv.className = "factlens-citation";
 
         const titleSpan = document.createElement("span");
-        titleSpan.className = "citation-title";
+        titleSpan.className = "factlens-citation-title";
         titleSpan.textContent = `Fact: ${cit.fact_id}`;
 
         const metaSpan = document.createElement("span");
-        metaSpan.className = "citation-meta";
+        metaSpan.className = "factlens-citation-meta";
         metaSpan.textContent = ` – Source: ${cit.source_id}`;
 
         citDiv.appendChild(titleSpan);
         citDiv.appendChild(metaSpan);
+
         citationsEl.appendChild(citDiv);
       }
     }
